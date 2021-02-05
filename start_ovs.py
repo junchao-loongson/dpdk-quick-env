@@ -11,6 +11,7 @@ arg_f = False;
 
 hugepagenum = "";
 db_socket = "db.sock";
+en_dpdk=True;
 
 dir_bin = "./bin/";
 dir_sbin = "./sbin/";
@@ -24,8 +25,9 @@ ret_sdk = os.getenv('RTE_SDK')
 ret_target = os.getenv('RTE_TARGET');
 
 parse = argparse.ArgumentParser();
-parse.add_argument('-pages',default="128",type=str);
+parse.add_argument('-pages',default="128", type=str);
 parse.add_argument('-addbr',type=str);
+parse.add_argument('-dpdk', default="yes", type=str);
 parse.add_argument('-addport',type=str, nargs=3);
 
 
@@ -38,7 +40,7 @@ def init_hugepage(num):
 
     os.system("echo {} > /proc/sys/vm/nr_hugepages".format(num));
     
-    ps = subprocess.run(["cat", "/proc/sys/vm/nr_hugepages "], stdout=subprocess.PIPE);
+    ps = subprocess.run(["cat", "/proc/sys/vm/nr_hugepages"], stdout=subprocess.PIPE);
     if(num in str(ps.stdout)):
         print("set hugepage_nr {} success".format(num));
     else:
@@ -49,21 +51,27 @@ def init_hugepage(num):
 
 def init_kmod():
   
-    if(ret_sdk is None):
+    global en_dpdk
+    
+    if(en_dpdk and (ret_sdk is None)):
         print_error("please set RET_SDK and RTE_RARGET");
         exit(-1);
 
     os.system("modprobe uio");
     os.system("modprobe openvswitch");
-    os.system("insmod " + ret_sdk + "/" + ret_target + "/kmod/igb_uio.ko");
+    if(en_dpdk): 
+        os.system("insmod " + ret_sdk + "/" + ret_target + "/kmod/igb_uio.ko");
     
     ps = subprocess.run(["lsmod"], stdout=subprocess.PIPE);
     
-    if("igb_uio" in str(ps.stdout)):
+    if (en_dpdk == False):
+        print("no dpdk");
+    elif ("igb_uio" in str(ps.stdout)):
         print("igb_uio mod ok");
     else:
         print_error("ismod igb_uio error");
         exit(-1);
+    
     if("openvswitch" in str(ps.stdout)):
         print("OVS mod ok");
     else:
@@ -73,7 +81,9 @@ def init_kmod():
 
 def init_env():
 
-    if(ret_sdk is None):
+    global en_dpdk
+    
+    if(en_dpdk and (ret_sdk is None)):
         print("please set RET_SDK and RTE_RARGET");
         exit(-1);
     if(not os.path.isfile("./bin/ovs-vsctl")):
@@ -98,7 +108,11 @@ def add_br(name):
     os.system(dir_bin + "ovs-vsctl show");
 
 def add_port(br, name, idx):
-    os.system(dir_bin + "ovs-vsctl add-port {} {} -- set Interface {} type=dpdkvhostuserclient options:vhost-server-path=/usr/local/var/run/sock{} mtu_request=9000".format(br,name,name, idx));
+    if(en_dpdk):
+        os.system(dir_bin + "ovs-vsctl add-port {} {} -- set Interface {} type=dpdkvhostuserclient options:vhost-server-path=/usr/local/var/run/sock{} mtu_request=1500".format(br,name,name, idx));
+    else:
+        os.system(dir_bin + "ovs-vsctl add-port {} {}".format(br, name));
+    
     os.system(dir_bin + "ovs-vsctl show");
 
 def clr_env():
@@ -121,18 +135,24 @@ def show_info():
         ps1 = subprocess.run([dir_bin + "ovs-vsctl", "get", "Open_vSwitch", ".", "dpdk_initialized"], stdout=subprocess.PIPE);
         if("true" in str(ps1.stdout)):
             print("Open_vSwitch . dpdk_initialized");
-            os.system(dir_bin + "ovs-vsctl show");
         else:
             print_error("Open_vSwitch . dpdk_initialize ERROR!");
     else:
         print_error("ovs-vswitchd is not running!");
+    
+    os.system(dir_bin + "ovs-vsctl show");
 
 def cook_arg():
 
    global hugepagenum
+   global en_dpdk
    args = parse.parse_args();
    print(args);
    hugepagenum = args.pages;
+   if(not args.dpdk is None):
+       print(args.dpdk);
+       if(args.dpdk=="no"):
+           en_dpdk=False;
    if(not args.addbr is None):
        print(args.addbr);
        add_br(args.addbr);
@@ -144,6 +164,8 @@ def cook_arg():
            exit(-1);
        add_port(args.addport[0], args.addport[1], args.addport[2]);
        exit(0);
+
+cook_arg();
 
 if("page" in sys.argv):
     init_hugepage(sys.argv[sys.argv.index("page")+1]);
@@ -167,27 +189,36 @@ if("show" in sys.argv):
 if(arg_f):
     exit(0);
 
-cook_arg();
 init_env();
 init_hugepage(hugepagenum);
 init_kmod(); 
 clr_env();
 
+print("creat conf.db");
 os.system(dir_bin + "ovsdb-tool create " + dir_etc + "conf.db " + dir_share + "vswitch.ovsschema");
+print("start db server");
 os.system(dir_sbin + "ovsdb-server --remote=punix:" + db_socket + " --remote=db:Open_vSwitch,Open_vSwitch,manager_options --pidfile --detach");
+print("set per port mem");
 os.system(dir_bin + "ovs-vsctl --no-wait set Open_vSwitch . other_config:per-port-memory=true");
+print("init");
 os.system(dir_bin + "ovs-vsctl --no-wait init");
-os.system(dir_bin + "ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-lcore-mask=0x2");
-os.system(dir_bin + "ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-socket-mem=2048");
-os.system(dir_bin + "ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=true");
+print("set port mask");
+if(en_dpdk):
+    os.system(dir_bin + "ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-lcore-mask=0x2");
+    print("set socket mem");
+    os.system(dir_bin + "ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-socket-mem=2048");
+    print("init dpdk");
+    os.system(dir_bin + "ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=true");
+
+print("set log");
 os.system(dir_sbin + "ovs-vswitchd unix:"+ dir_work +"var/run/openvswitch/db.sock  --pidfile --detach --log-file=" + dir_var_log +"ovs-vswitchd.log");
 
 ps = subprocess.run([dir_bin + "ovs-vsctl", "get", "Open_vSwitch", ".", "dpdk_initialized"], stdout=subprocess.PIPE);
 
 if("true" in str(ps.stdout)):
-    print("ovs-vswitchd start!");
+    print("ovs-vswitchd dpdk start!");
 else :
-    print_error("ovs-vswitchd start ERROR!");
+    print_error("ovs-vswitchd dpdk start ERROR!");
 
 
 
