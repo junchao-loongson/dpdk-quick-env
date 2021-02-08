@@ -165,8 +165,6 @@ def cook_arg():
        add_port(args.addport[0], args.addport[1], args.addport[2]);
        exit(0);
 
-cook_arg();
-
 if("page" in sys.argv):
     init_hugepage(sys.argv[sys.argv.index("page")+1]);
     arg_f = True;
@@ -189,6 +187,7 @@ if("show" in sys.argv):
 if(arg_f):
     exit(0);
 
+cook_arg();
 init_env();
 init_hugepage(hugepagenum);
 init_kmod(); 
